@@ -1,0 +1,124 @@
+swagger: "2.0"
+
+info:
+  version: 1.0.0
+  title: Simple APi Node-todos
+  description: A simple API to learn how to write OpenAPI Specification
+
+schemes:
+  - https
+host: simple.api
+# basePath: /api
+
+paths:
+  /:
+    get:
+      summary: Gets index.html
+      description: Returns index.html.
+      responses:
+        200:
+          description: index.html page displayed
+        500:
+          $ref: "#/responses/Standard500ErrorResponse"
+
+          # headers:
+          #   Content-Type:
+          #     Type:string
+          #     description: index.html page displayed
+  /api/todos:
+    get:
+      summary: Gets some todos
+      description: Returns a list containing all todos. The list supports paging.
+      parameters:
+       - name: pageSize
+         in: query
+         description: Number of todos returned
+         type: integer
+       - name: pageNumber
+         in: query
+         description: Page number
+         type: integer
+      responses:
+        200:
+          description: A list of todo
+          schema:
+            $ref: "#/definitions/todos"
+        500:
+          $ref: "#/responses/Standard500ErrorResponse"
+    post:
+      summary: Creates a todo
+      description: Adds a new todo to the todos list.
+      parameters:
+        - name: todo
+          in: body
+          description: The todo to create.
+          schema:
+            $ref: "#/definitions/todo"
+      responses:
+        204:
+          description: todo succesfully created.
+        400:
+          description: todo couldn't have been created.
+        500:
+          $ref: "#/responses/Standard500ErrorResponse"
+
+  /api/todos/{todos_id}:
+    parameters:
+      - name: todos_id
+        in: path
+        required: true
+        description: The todo's username
+        type: string
+    # get:
+    #   summary: Gets a todo
+    #   description: Returns a single todo for its username.
+    #   responses:
+    #     200:
+    #       description: A todo
+    #       schema:
+    #         $ref: "#/definitions/todo"
+    #     404:
+    #       $ref: "#/responses/todoDoesNotExistResponse"
+    #     500:
+    #       $ref: "#/responses/Standard500ErrorResponse"
+    delete:
+      summary: Deletes a todo
+      description: Delete a single todo identified via its username
+      responses:
+        204:
+          description: todo successfully deleted.
+        404:
+          $ref: "#/responses/todoDoesNotExistResponse"
+        500:
+          $ref: "#/responses/Standard500ErrorResponse"
+definitions:
+  todo:
+    required:
+      - username
+      - todos_id
+    properties:
+      todos_id:
+        type: integer
+      username:
+        type: string
+  todos:
+    type: array
+    items:
+      $ref: "#/definitions/todo"
+  Error:
+    required:
+      - code
+      - message
+    properties:
+      code:
+        type: string
+      message:
+        type: string
+
+responses:
+  Standard500ErrorResponse:
+    description: An unexpected error occured.
+    schema:
+      $ref: "#/definitions/Error"
+  todoDoesNotExistResponse:
+    description: todo does not exist.

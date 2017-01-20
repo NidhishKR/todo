@@ -1,0 +1,312 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  VPC:
+    Type: String
+    Description: Provide the VPC ID.
+  TagName:
+    Type: String
+    Description: Tag Name of your Infrastructure.
+  ECSClusterName:
+    Type: String
+    Description: Name of an existing ECS Cluster.
+  PublicSubnetAZ1:
+    Description: Public Subnet ID in Availability Zone 1.
+    Type: String
+  PublicSubnetAZ2:
+    Description: Public Subnet ID in Availability Zone 2.
+    Type: String
+  PublicSecurityGroupID:
+    Description: Public Security Group ID for LoadBalancer.
+    Type: String
+Resources:
+  CloudwatchLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['-', [apiGatewayLogGroup, !Ref 'AWS::StackName']]
+      RetentionInDays: 14
+  mongoTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: mongo
+      ContainerDefinitions:
+      - Name: mongo
+        Cpu: '256'
+        Essential: 'true'
+        Image: mongo
+        Memory: '128'
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group: !Ref 'CloudwatchLogsGroup'
+            awslogs-region: !Ref 'AWS::Region'
+            awslogs-stream-prefix: mongo
+        PortMappings:
+        - ContainerPort: 27017
+          HostPort: 0
+      - Name: node-todo
+        Cpu: '256'
+        Essential: 'true'
+        Image: nidhishkr/node-tod
+        Memory: '128'
+        Links: ["mongo"]
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group: !Ref 'CloudwatchLogsGroup'
+            awslogs-region: !Ref 'AWS::Region'
+            awslogs-stream-prefix: nidhishkr/node-tod
+        PortMappings:
+        - ContainerPort: 7070
+          HostPort: 0
+      Volumes:
+      - Name: my-vol
+  apiGatewayService:
+    Type: AWS::ECS::Service
+    DependsOn: apiGatewayALBListener
+    Properties:
+     Cluster: !Ref 'ECSClusterName'
+     DesiredCount: '1'
+     LoadBalancers:
+     - ContainerName: node-todo
+       ContainerPort: '7070'
+       TargetGroupArn: !Ref 'apiGatewayTargetGroup'
+     Role: !Ref 'ECSServiceRole'
+     TaskDefinition: !Ref 'apiGatewayTaskDefinition'
+  ECSServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+  ECSServicePolicy:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "ecs-service"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: ['elasticloadbalancing:*', 'ec2:*']
+            Resource: '*'
+      Roles: [!Ref 'ECSServiceRole']
+  apiGatewayALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: apiGateway-ALB
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '30'
+      Subnets:
+        - !Ref PublicSubnetAZ1
+        - !Ref PublicSubnetAZ2
+      SecurityGroups:
+        - !Ref PublicSecurityGroupID
+  apiGatewayTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: apiGatewayALB
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Name: apiGateway
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      VpcId:
+        Fn::ImportValue:
+          Fn::Sub: "${TagName}-VpcId"
+  apiGatewayALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn: ECSServiceRole
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !Ref 'apiGatewayTargetGroup'
+      LoadBalancerArn: !Ref 'apiGatewayALB'
+      Port: '80'
+      Protocol: HTTP
+  ECSALBListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    DependsOn: apiGatewayALBListener
+    Properties:
+      Actions:
+      - Type: forward
+        TargetGroupArn: !Ref 'apiGatewayTargetGroup'
+      Conditions:
+      - Field: path-pattern
+        Values: [/]
+      ListenerArn: !Ref 'apiGatewayALBListener'
+      Priority: 1
+  apiGatewayAPI:
+    Type: "AWS::ApiGateway::RestApi"
+    Properties:
+      Description: "Demo API for apiGateway application"
+      Name: "apiGatewayAPI"
+  apiGatewayApiResource:
+    Type: "AWS::ApiGateway::Resource"
+    Properties:
+      RestApiId: !Ref apiGatewayAPI
+      ParentId: !GetAtt [apiGatewayAPI, RootResourceId]
+      PathPart: 'api'
+  apiGatewayTodosResource:
+    Type: "AWS::ApiGateway::Resource"
+    Properties:
+      RestApiId: !Ref apiGatewayAPI
+      ParentId: !Ref apiGatewayApiResource
+      PathPart: 'todos'
+  apiGatewayTodo_idResource:
+    Type: "AWS::ApiGateway::Resource"
+    Properties:
+      RestApiId: !Ref apiGatewayAPI
+      ParentId: !Ref apiGatewayTodosResource
+      PathPart: '{todo_id}'
+  apiGatewayDeleteMethod:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      RestApiId: !Ref apiGatewayAPI
+      ResourceId: !Ref apiGatewayTodo_idResource
+      HttpMethod: DELETE
+      AuthorizationType: "NONE"
+      ApiKeyRequired: "true"
+      Integration:
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: DELETE
+        Uri: !Join ['', ["http://", !GetAtt apiGatewayALB.DNSName, "/api/todos/{todo_id}"]]
+  apiGatewayAnyMethod:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      RestApiId: !Ref apiGatewayAPI
+      ResourceId: !GetAtt [apiGatewayAPI, RootResourceId]
+      HttpMethod: ANY
+      AuthorizationType: "NONE"
+      ApiKeyRequired: "true"
+      Integration:
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: ANY
+        Uri: !Join ['', ["http://", !GetAtt apiGatewayALB.DNSName]]
+  # apiGatewayMethod3:
+  #   Type: "AWS::ApiGateway::Method"
+  #   Properties:
+  #     RestApiId: !Ref apiGatewayAPI
+  #     ResourceId: !Ref apiGatewayResource
+  #     HttpMethod: PATCH
+  #     AuthorizationType: "NONE"
+  #     ApiKeyRequired: "true"
+  #     Integration:
+  #       Type: HTTP_PROXY
+  #       IntegrationHttpMethod: PATCH
+  #       Uri: !Join ['', ["http://", !GetAtt apiGatewayALB.DNSName, "/api/todos"]]
+  # apiGatewayMethod4:
+  #   Type: "AWS::ApiGateway::Method"
+  #   Properties:
+  #     RestApiId: !Ref apiGatewayAPI
+  #     ResourceId: !Ref apiGatewayResource
+  #     HttpMethod: PUT
+  #     AuthorizationType: "NONE"
+  #     ApiKeyRequired: "true"
+  #     Integration:
+  #       Type: HTTP_PROXY
+  #       IntegrationHttpMethod: PUT
+  #       Uri: !Join ['', ["http://", !GetAtt apiGatewayALB.DNSName, "/{proxy}"]]
+  # apiGatewayMethod5:
+  #   Type: "AWS::ApiGateway::Method"
+  #   Properties:
+  #     RestApiId: !Ref apiGatewayAPI
+  #     ResourceId: !Ref apiGatewayResource
+  #     HttpMethod: OPTIONS
+  #     AuthorizationType: "NONE"
+  #     ApiKeyRequired: "true"
+  #     Integration:
+  #       Type: HTTP_PROXY
+  #       IntegrationHttpMethod: OPTIONS
+  #       Uri: !Join ['', ["http://", !GetAtt apiGatewayALB.DNSName, "/{proxy}"]]
+  apiGatewayGetMethod:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      RestApiId: !Ref apiGatewayAPI
+      ResourceId: !Ref apiGatewayResource3
+      HttpMethod: GET
+      AuthorizationType: "NONE"
+      ApiKeyRequired: "true"
+      Integration:
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: GET
+        Uri: !Join ['', ["http://", !GetAtt apiGatewayALB.DNSName, "/api/todos"]]
+  apiGatewayPostMethod:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      RestApiId: !Ref apiGatewayAPI
+      ResourceId: !Ref apiGatewayResource3
+      HttpMethod: POST
+      AuthorizationType: "NONE"
+      Integration:
+        Type: "HTTP"
+        IntegrationHttpMethod: "POST"
+        Uri: !Join ['', ["http://", !GetAtt apiGatewayALB.DNSName, "/api/todos"]]
+        IntegrationResponses:
+          - StatusCode: 200
+      MethodResponses:
+        - StatusCode: 200
+  APIDeployment:
+    DependsOn: apiGatewayMethod
+    Type: "AWS::ApiGateway::Deployment"
+    Properties:
+      RestApiId:
+        Ref: "apiGatewayAPI"
+      Description: "Deployment of apiGateway application"
+      StageName: "DummyStage"
+  DevelopmentAPIStage:
+    Type: "AWS::ApiGateway::Stage"
+    Properties:
+      StageName: "Development"
+      Description: "Stage for Development environment"
+      RestApiId:
+        Ref: "apiGatewayAPI"
+      DeploymentId:
+        Ref: "APIDeployment"
+      MethodSettings:
+        -
+          ResourcePath: "/*"
+          HttpMethod: "*"
+          MetricsEnabled: "true"
+          DataTraceEnabled: "true"
+  UsagePlan:
+    Type: "AWS::ApiGateway::UsagePlan"
+    Properties:
+      ApiStages:
+      - ApiId: !Ref 'apiGatewayAPI'
+        Stage: !Ref 'DevelopmentAPIStage'
+      Description: Customer apiGatewayAPI's usage plan
+      Quota:
+        Limit: 5000
+        Period: MONTH
+      Throttle:
+        BurstLimit: 200
+        RateLimit: 100
+      UsagePlanName: apiGatewayAPI
+  ApiKey:
+    Type: "AWS::ApiGateway::ApiKey"
+    DependsOn:
+      - "UsagePlan"
+      - "apiGatewayMethod"
+      - "APIDeployment"
+    Properties:
+      Name: "apiGatewayAPI"
+      Description: "CloudFormation API Key apiGatewayAPI"
+      Enabled: "true"
+      StageKeys:
+        - RestApiId:
+            Ref: "apiGatewayAPI"
+          StageName: "Development"
+Outputs:
+  ecsservice:
+    Value: !Ref 'apiGatewayService'
+  apiGatewayURL:
+    Value: !Join ['', ["https://", !Ref 'apiGatewayAPI', ".execute-api.", !Ref 'AWS::Region', ".amazonaws.com"]]
